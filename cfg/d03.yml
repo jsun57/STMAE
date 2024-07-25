@@ -1,0 +1,80 @@
+---
+pipeline: 'pretrain'
+backbone: 'dcrnn'
+in_horizon: 12
+out_horizon: 12
+dtype: 'float32'
+adj_type: 'None'
+
+
+backbone_specs:
+  in_dim: 2
+  out_dim: 1
+  rnn_dim: 64
+  num_layers: 2
+  max_diffusion_step: 2
+  cl_decay_steps: 2000
+  filter_type: dual_random_walk
+  use_curriculum_learning: true
+  stru_dec_drop: 0
+  stru_dec_proj: true
+
+
+data_specs:
+  dataset: 'pems_03'
+
+
+mask_specs:
+  epoch_wise_mask: false
+  mask_s: 0.3
+  mask_f: 0.3
+  mask_s_strategy: 'rw_fill'  # uniform, uniform_post_ce, rw
+  mask_f_strategy: 'patch_uniform'    # uniform, patch_uniform
+  normalize: false
+  patch_length: 2
+  with_negative: false
+  walks_per_node: 1
+  walk_length: 3
+  start: 'node'
+  p: 1
+  q: 4
+
+
+learn_specs:
+  # pretrain specifics
+  opt_name: 'adam'
+  pt_lr: 0.01
+  pt_wd: 0
+  pt_eps: 0.001
+  batch_size: 64
+  train_epoch: 100
+  pt_sched_policy: 'None'
+  pt_num_epoch_fix_lr: 0
+  pt_decay_step: 0
+  pt_gamma: 0
+  pt_milestones: []
+  pt_clip_grad: 5
+  # finetune specific if learning in pretrain+finetune
+  ft: true
+  lr_enc: 0.01
+  lr_dec: 0.01
+  wd_enc: 0
+  wd_dec: 0
+  ft_eps: 0.001
+  ft_epoch: 100
+  ft_sched_policy: 'm_step'
+  ft_num_epoch_fix_lr: 0
+  ft_decay_step: 0
+  ft_gamma: 0.1
+  ft_milestones: [20, 30, 40, 50]
+  ft_clip_grad: 5
+  de_mlp: false
+  # extras
+  patience: -1
+
+
+loss_specs:
+  sl_weight: 0.5
+  fl_weight: 1.0
+  sl_type: 'cls_ce'
+  fl_type: 'reg_l1'

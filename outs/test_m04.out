@@ -1,0 +1,5 @@
+Pretrainer initialization done.
+Finetuner initialization done.
+>>> finish loading pretrained-encoder, decoder model ckpt from path 'results/m04/models/ckpt_m04_ft_best.pth.tar'
+Average Test MAE: 18.8767, Test MAPE: 12.7774, Test RMSE: 30.285601
+MAE at 15 min: 18.1716, MAE at 30 min: 18.9109, MAE at 60 min: 20.138676

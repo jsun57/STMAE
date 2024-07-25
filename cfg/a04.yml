@@ -1,0 +1,75 @@
+---
+pipeline: 'pretrain'
+backbone: 'agcrn'
+in_horizon: 12
+out_horizon: 12
+dtype: 'float32'
+adj_type: 'None'
+
+
+backbone_specs:
+  in_dim: 1
+  out_dim: 1
+  rnn_dim: 64
+  num_layers: 2
+  cheb_k: 2
+  stru_dec_drop: 0
+  stru_dec_proj: false
+
+
+data_specs:
+  dataset: 'pems_04'
+
+
+mask_specs:
+  epoch_wise_mask: false
+  mask_s: 0.2
+  mask_f: 0.3
+  mask_s_strategy: 'rw_fill'          # uniform, uniform_post_ce, rw
+  mask_f_strategy: 'patch_uniform'    # uniform, patch_uniform
+  normalize: false
+  patch_length: 2
+  with_negative: false
+  walks_per_node: 10
+  walk_length: 20
+  start: 'node'
+  p: 1
+  q: 1
+
+
+learn_specs:
+  # pretrain specifics
+  opt_name: 'adam'
+  pt_lr: 0.003
+  pt_wd: 0
+  batch_size: 64
+  train_epoch: 100
+  pt_sched_policy: 'None'
+  pt_num_epoch_fix_lr: 0
+  pt_decay_step: 0
+  pt_gamma: 0
+  pt_milestones: []
+  pt_clip_grad: 'None'
+  # finetune specific if learning in pretrain+finetune
+  ft: true
+  lr_enc: 0.003
+  lr_dec: 0.003
+  wd_enc: 0
+  wd_dec: 0
+  ft_epoch: 100
+  ft_sched_policy: 'None'
+  ft_num_epoch_fix_lr: 0
+  ft_decay_step: 0
+  ft_gamma: 0
+  ft_milestones: []
+  ft_clip_grad: 'None'
+  de_mlp: true
+  # extras
+  patience: -1
+
+
+loss_specs:
+  sl_weight: 2
+  fl_weight: 1.0
+  sl_type: 'cls_boost'
+  fl_type: 'reg_l1'
