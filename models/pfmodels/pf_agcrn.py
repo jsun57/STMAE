@@ -20,11 +20,7 @@ class AVWGCN(nn.Module):
     
     def apply_s_mask(self, support, s_mask, normalize=False):
         """
-        TODO: structrual masking here: for AGCRN, batch-wise masking is the same
-        support: [N, N] row stochastic matrix
         NOTE: mask: 1 is keep, 0 is masked
-        TODO: should we fix this per training iteration, for better loss decoding?
-        Current: L * T * num_rnn_units dynamic masking
         """
         N, _ = support.shape
         
@@ -38,9 +34,7 @@ class AVWGCN(nn.Module):
         node_num = node_embeddings.shape[0]
         supports = F.softmax(F.relu(torch.mm(node_embeddings, node_embeddings.transpose(0, 1))), dim=1) # [N, N]: row sum is 1
 
-        ### perform graph structure masking ###
         supports = self.apply_s_mask(supports, s_mask, normalize)
-        #######################################
         
         support_set = [torch.eye(node_num).to(supports.device), supports]
         for k in range(2, self.cheb_k):
@@ -128,7 +122,6 @@ class InnerProductDecoder(nn.Module):
         return adj
 
 
-
 class AGCRN(nn.Module):
     def __init__(
         self, 
@@ -158,10 +151,7 @@ class AGCRN(nn.Module):
 
         self.encoder = AVWDCRNN(num_nodes, rnn_units, rnn_units, cheb_k, embed_dim, num_layers)
 
-        # TODO: more complex structure decoder
         self.structure_decoder = InnerProductDecoder(stru_dec_drop, act=lambda x: x, with_proj=stru_dec_proj, hid_dim=rnn_units)
-
-        # TODO: more complex feature decoder
         self.feature_decoder = nn.Conv2d(1, in_horizon, kernel_size=(1, rnn_units), bias=True)
         
         self.to_feat_embedding = nn.Linear(in_dim, rnn_units)
@@ -185,7 +175,7 @@ class AGCRN(nn.Module):
         return support
 
 
-    def feature_masking(self, x, mask_ratio, mask_f_strategy='uniform', mask=None, *args, **kwargs):
+    def feature_masking(self, x, mask_ratio, mask_f_strategy='patch_uniform', mask=None, *args, **kwargs):
         """
         masking according to strategy: per sample masking on time axis
         x: [B, Tin, N, Din=1]
@@ -202,179 +192,79 @@ class AGCRN(nn.Module):
             x_masked = x
             return x_masked, mask
 
-        if mask_f_strategy == 'uniform':
-            # simplest masking: same per batch, same area per node
-            len_discard = round(T * mask_ratio)
+        assert mask_f_strategy == 'patch_uniform'
             
-            noise = torch.rand(B, T, N, device=x.device)
-            ids_shuffle = torch.argsort(noise, dim=1)
-            ids_restore = torch.argsort(ids_shuffle, dim=1)
+        patch_length = kwargs.get('patch_length', 1)    # default is 1: collaspe to uniform
+        assert patch_length <= T / 2 and T % patch_length == 0, 'patch_length need to be smaller than sequence length and dividable.'
+        num_patches = T // patch_length
+        num_masked_patches = round(num_patches * mask_ratio)
+        
+        # Initialize the mask with all ones: mask on T dim
+        mask = torch.ones([B, T, N], device=x.device)  
+        
+        # Randomly select patches to be masked
+        masked_indices = torch.randperm(num_patches)[:num_masked_patches]
+        
+        # Generate the indices to mask
+        start_indices = (masked_indices * patch_length).to(dtype=torch.long, device=x.device)
+        end_indices = (start_indices + patch_length).to(dtype=torch.long, device=x.device)
 
-            # generate binary mask
-            mask = torch.ones([B, T, N], device=x.device)
-            mask[:, :len_discard, :] = 0
-            mask = torch.gather(mask, dim=1, index=ids_restore)
+        ranges = torch.stack([torch.arange(start, end) for start, end in zip(start_indices, end_indices)])
+        all_indices = torch.flatten(ranges).to(x.device)
+        mask.scatter_(1, repeat(all_indices, 't -> b t n', b=B, n=N), 0)
 
-            # mask by zero 
-            x_masked = x * mask.unsqueeze(-1)
+        # mask by zero 
+        x_masked = x * mask.unsqueeze(-1)
 
-        elif mask_f_strategy == 'patch_uniform':
-            
-            patch_length = kwargs.get('patch_length', 1)    # default is 1: collaspe to uniform
-            assert patch_length <= T / 2 and T % patch_length == 0, 'patch_length need to be smaller than sequence length and dividable.'
-            num_patches = T // patch_length
-            num_masked_patches = round(num_patches * mask_ratio)
-            
-            # Initialize the mask with all ones: mask on T dim
-            mask = torch.ones([B, T, N], device=x.device)  
-            
-            # Randomly select patches to be masked
-            masked_indices = torch.randperm(num_patches)[:num_masked_patches]
-            
-            # Generate the indices to mask
-            start_indices = (masked_indices * patch_length).to(dtype=torch.long, device=x.device)
-            end_indices = (start_indices + patch_length).to(dtype=torch.long, device=x.device)
-
-            ranges = torch.stack([torch.arange(start, end) for start, end in zip(start_indices, end_indices)])
-            all_indices = torch.flatten(ranges).to(x.device)
-            mask.scatter_(1, repeat(all_indices, 't -> b t n', b=B, n=N), 0)
-
-            # mask by zero 
-            x_masked = x * mask.unsqueeze(-1)
-
-        elif mask_f_strategy == 'rw':
-            # TODO  
-            pass
 
         return x_masked, mask
 
 
-    def structure_masking(self, x, mask_ratio, mask_s_strategy='uniform', mask=None, *args, **kwargs):
+    def structure_masking(self, x, mask_ratio, mask_s_strategy='rw_fill', mask=None, *args, **kwargs):
         """
-        TODO: structrual masking here: for AGCRN, batch-wise masking is the same
-        support: [N, N] row stochastic matrix
         NOTE: mask: 1 is keep, 0 is masked
-        TODO: should we fix this per training iteration, for better loss decoding?
-        Current: L * T * num_rnn_units dynamic masking
         """
         B, _, N, _ = x.shape
 
-        rw_percent = -1
-
         if mask is not None:
-            return mask, rw_percent
+            return mask
 
         if mask_ratio == 0:
-            return torch.ones(N, N, device=x.device), rw_percent
+            return torch.ones(N, N, device=x.device)
 
-        if mask_s_strategy == 'uniform':
-            # simplest masking: same per batch, same area per node
-            num_discard = round(N * N * mask_ratio)
+        assert mask_s_strategy == 'rw_fill'
             
-            orig_indices = torch.nonzero(torch.ones_like(self.get_support()))
-            shuffled_idx = torch.randperm(N * N)
-            mask_indices = shuffled_idx[:num_discard]
+        goal_discard = round(N * N * mask_ratio)
 
-            mask = torch.ones(N, N, device=x.device)
-            actual_mask_idx = orig_indices[mask_indices]
-            mask[actual_mask_idx[:, 0], actual_mask_idx[:, 1]] = 0
-
-        elif mask_s_strategy == 'uniform_post_ce':
-
-            with_negative = kwargs.get('with_negative', False)
-
-            current_support = self.get_support()    # [N, N]
-            binaried_support = (current_support > 0.5).to(current_support.dtype)
-
-            num_edges = torch.count_nonzero(binaried_support).item()
-            num_discard = round(num_edges * mask_ratio)
-
-            orig_indices = torch.nonzero(binaried_support)
-            shuffled_idx = torch.randperm(num_edges)
-            mask_indices = shuffled_idx[:num_discard]
-
-            mask = torch.ones(N, N, device=x.device)
-            actual_mask_idx = orig_indices[mask_indices]
-            mask[actual_mask_idx[:, 0], actual_mask_idx[:, 1]] = 0
-
-            if with_negative:
-                # negative edge selection
-                ne_edge_indices = torch.nonzero(abs(binaried_support - 1))
-                num_non_edges = ne_edge_indices.size(0)
-                shuffled_idx = torch.randperm(num_non_edges)
-                mask_indices = shuffled_idx[:num_discard]
-
-                actual_mask_idx = ne_edge_indices[mask_indices]
-                mask[actual_mask_idx[:, 0], actual_mask_idx[:, 1]] = 0
-
-        elif mask_s_strategy == 'rw':
-            
-            with_negative = kwargs.get('with_negative', False)
-
-            # random-walk based path masking strategy
-            current_support = self.get_support()    # [N, N]
-            binaried_support = (current_support > 0.5).to(current_support.dtype)
-            num_edges = torch.count_nonzero(binaried_support).item()
-
-            walks_per_node = kwargs.get('walks_per_node', 1)
-            walk_length = kwargs.get('walk_length', 3)
-            start = kwargs.get('start', 'node')
-            p = kwargs.get('p', 1.0)
-            q = kwargs.get('q', 1.0)
-            masked_edge_index, num_discard = mask_path(binaried_support, mask_ratio, walks_per_node=walks_per_node, \
-            walk_length=walk_length, start=start, p=p, q=q)
-
-            mask = torch.ones_like(binaried_support)
+        # STEP1: random-walk based path masking: fully connected graph 
+        binaried_support = torch.ones_like(self.get_support())
+        walks_per_node = kwargs.get('walks_per_node', 10)
+        walk_length = kwargs.get('walk_length', 20)
+        start = kwargs.get('start', 'node')
+        p = kwargs.get('p', 1.0)
+        q = kwargs.get('q', 1.0)
+        masked_edge_index, num_discard = mask_path(binaried_support, mask_ratio=mask_ratio, walks_per_node=walks_per_node, \
+        walk_length=walk_length, start=start, p=p, q=q) # [2, num_masked]
+        
+        # STEP2: if more, discard; else, uniform add
+        mask = torch.ones_like(binaried_support)
+        if goal_discard > num_discard:
+            mask[masked_edge_index[0, :], masked_edge_index[1, :]] = 0
+            # uniform masking
+            remain_discard = goal_discard - num_discard
+            remain_idx = torch.nonzero(binaried_support * mask)
+            shuffled_idx = torch.randperm(remain_idx.size(0))
+            mask_indices = shuffled_idx[:remain_discard]
+            remain_actual_mask_idx = remain_idx[mask_indices]
+            mask[remain_actual_mask_idx[:, 0], remain_actual_mask_idx[:, 1]] = 0
+        else:
+            masked_edge_index = masked_edge_index[:,:goal_discard]
             mask[masked_edge_index[0, :], masked_edge_index[1, :]] = 0
 
-            if with_negative:
-                # negative edge selection
-                ne_edge_indices = torch.nonzero(abs(binaried_support - 1))
-                num_non_edges = ne_edge_indices.size(0)
-                shuffled_idx = torch.randperm(num_non_edges)
-                mask_indices = shuffled_idx[:num_discard]
-                
-                actual_mask_idx = ne_edge_indices[mask_indices]
-                mask[actual_mask_idx[:, 0], actual_mask_idx[:, 1]] = 0
-
-        elif mask_s_strategy == 'rw_fill':
-            
-            goal_discard = round(N * N * mask_ratio)
-
-            # STEP1: random-walk based path masking: fully connected graph 
-            binaried_support = torch.ones_like(self.get_support())
-            walks_per_node = kwargs.get('walks_per_node', 10)
-            walk_length = kwargs.get('walk_length', 20)
-            start = kwargs.get('start', 'node')
-            p = kwargs.get('p', 1.0)
-            q = kwargs.get('q', 1.0)
-            masked_edge_index, num_discard = mask_path(binaried_support, mask_ratio=mask_ratio, walks_per_node=walks_per_node, \
-            walk_length=walk_length, start=start, p=p, q=q) # [2, num_masked]
-            
-            rw_percent = num_discard / goal_discard
-            
-            # STEP2: if more, discard; else, uniform add
-            mask = torch.ones_like(binaried_support)
-            if goal_discard > num_discard:
-                mask[masked_edge_index[0, :], masked_edge_index[1, :]] = 0
-                # uniform masking
-                remain_discard = goal_discard - num_discard
-                remain_idx = torch.nonzero(binaried_support * mask)
-                shuffled_idx = torch.randperm(remain_idx.size(0))
-                mask_indices = shuffled_idx[:remain_discard]
-                remain_actual_mask_idx = remain_idx[mask_indices]
-                mask[remain_actual_mask_idx[:, 0], remain_actual_mask_idx[:, 1]] = 0
-            else:
-                masked_edge_index = masked_edge_index[:,:goal_discard]
-                mask[masked_edge_index[0, :], masked_edge_index[1, :]] = 0
-
-        else:
-            raise NotImplementedError
-
-        return mask, rw_percent
+        return mask
 
 
-    def encode(self, x, mask_s=0, mask_f=0, mask_s_strategy='uniform', mask_f_strategy='uniform', *args, **kwargs):
+    def encode(self, x, mask_s=0, mask_f=0, mask_s_strategy='rw_fill', mask_f_strategy='patch_uniform', *args, **kwargs):
         """
         input: [B, Tin, N, Din]
         output: [B, Tin, N, F], [B, N, F]
@@ -392,21 +282,20 @@ class AGCRN(nn.Module):
         embed_x = embed_x * f_mask.unsqueeze(-1) + repeat(self.mask_token, 'd -> b t n d', b=B, t=T, n=N) * (1 - f_mask.unsqueeze(-1))
 
         # structure mask:
-        s_mask, rw_percent = self.structure_masking(raw_x, mask_s, mask_s_strategy, mask=kwargs.get('s_mask', None), *args, **kwargs)
+        s_mask = self.structure_masking(raw_x, mask_s, mask_s_strategy, mask=kwargs.get('s_mask', None), *args, **kwargs)
 
         # encode
         normalize = kwargs.get('normalize', False)
         embedding, _ = self.encoder(embed_x, init_state, self.node_embeddings, s_mask, normalize=normalize)
         summary = embedding[:, -1:, :, :].squeeze(1)
 
-        return embedding, summary, f_mask, s_mask, rw_percent
+        return embedding, summary, f_mask, s_mask
 
 
     def decode_structure(self, summary):
         """
         summary: [B, N, H]
         output: [B, N, N], between (0, 1)
-        TODO: add inter projecter? Use node_embedding instead of summary?
         """
         return self.structure_decoder(summary)
 
@@ -415,12 +304,11 @@ class AGCRN(nn.Module):
         """
         summary: [B, N, H]
         output: [B, Tin, N, Din]
-        TODO: add inter projecter? Use embedding instead of summary?
         """
         return self.feature_decoder(summary.unsqueeze(1))
         
 
-    def forward_s_loss(self, target, pred, s_mask, l_type='reg_l2'):
+    def forward_s_loss(self, target, pred, s_mask, l_type='cls_boost'):
         """
         target (support): [N, N]
         pred: [B, N, N]
@@ -428,106 +316,54 @@ class AGCRN(nn.Module):
         """
         # structure loss
         B = pred.shape[0]
-        if l_type == 'reg_l2':
-            target = repeat(target, 'm n -> b m n', b=B)
-            si_mask = repeat(abs(s_mask - 1), 'm n -> b m n', b=B)
-            if torch.sum(si_mask) != 0:
-                diff = (torch.flatten(pred) - torch.flatten(target)) ** 2 * torch.flatten(si_mask)
-                loss = torch.sum(diff) / torch.sum(si_mask)
-            else:
-                # do not mask: this is for ablation
-                diff = (torch.flatten(pred) - torch.flatten(target)) ** 2
-                loss = torch.mean(diff)
-        
-        elif l_type == 'reg_l1':
-            target = repeat(target, 'm n -> b m n', b=B)
-            si_mask = repeat(abs(s_mask - 1), 'm n -> b m n', b=B)
-            if torch.sum(si_mask) != 0:
-                diff = torch.abs(torch.flatten(pred) - torch.flatten(target)) * torch.flatten(si_mask)
-                loss = torch.sum(diff) / torch.sum(si_mask)
-            else:
-                # do not mask: this is for ablation
-                diff = torch.abs(torch.flatten(pred) - torch.flatten(target))
-                loss = torch.mean(diff)
 
-        elif l_type == 'cls_ce':
-            target = (target > 0.5).to(pred.dtype)
-            target = repeat(target, 'm n -> b m n', b=B)
-            si_mask = repeat(abs(s_mask - 1), 'm n -> b m n', b=B)
-            if torch.sum(si_mask) != 0:
-                diff = F.binary_cross_entropy_with_logits(pred, target, reduction='none') * si_mask
-                loss = torch.sum(diff) / torch.sum(si_mask)
-            else:
-                diff = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
-                loss = torch.mean(diff)
-
-        elif l_type == 'cls_boost':
-            target = torch.ones_like(target)
-            target = repeat(target, 'm n -> b m n', b=B)
-            si_mask = repeat(abs(s_mask - 1), 'm n -> b m n', b=B)
-            if torch.sum(si_mask) != 0:
-                diff = F.binary_cross_entropy_with_logits(pred, target, reduction='none') * si_mask
-                loss = torch.sum(diff) / torch.sum(si_mask)
-            else:
-                diff = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
-                loss = torch.mean(diff)
-
+        assert l_type == 'cls_boost'
+        target = torch.ones_like(target)
+        target = repeat(target, 'm n -> b m n', b=B)
+        si_mask = repeat(abs(s_mask - 1), 'm n -> b m n', b=B)
+        if torch.sum(si_mask) != 0:
+            diff = F.binary_cross_entropy_with_logits(pred, target, reduction='none') * si_mask
+            loss = torch.sum(diff) / torch.sum(si_mask)
         else:
-            raise NotImplementedError
+            diff = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+            loss = torch.mean(diff)
 
         return loss
 
 
-    def forward_f_loss(self, target, pred, f_mask, l_type='reg_l2'):
+    def forward_f_loss(self, target, pred, f_mask, l_type='reg_l1'):
         """
         target (support): [B, Tin, N, C=2]?
         pred: [B, Tin, N, C=1]
         f_mask: [B, Tin, N]
         """
-        # TODO: feature recon. SCE? https://arxiv.org/pdf/2205.10803.pdf
         target = target[...,:1]
 
         # feature loss
         B, T, N, _ = pred.shape
-        if l_type == 'reg_l2':
-            target, pred = target.squeeze(-1), pred.squeeze(-1)
-            fi_mask = abs(f_mask - 1)
-            if torch.sum(fi_mask) != 0:
-                diff = (torch.flatten(pred) - torch.flatten(target)) ** 2 * torch.flatten(fi_mask)
-                loss = torch.sum(diff) / torch.sum(fi_mask)
-            else:
-                # do not mask: this is for ablation
-                diff = (torch.flatten(pred) - torch.flatten(target)) ** 2
-                loss = torch.mean(diff)
-        
-        elif l_type == 'reg_l1':
-            target, pred = target.squeeze(-1), pred.squeeze(-1)
-            fi_mask = abs(f_mask - 1)
-            if torch.sum(fi_mask) != 0:
-                diff = torch.abs(torch.flatten(pred) - torch.flatten(target)) * torch.flatten(fi_mask)
-                loss = torch.sum(diff) / torch.sum(fi_mask)
-            else:
-                # do not mask: this is for ablation
-                diff = torch.abs(torch.flatten(pred) - torch.flatten(target))
-                loss = torch.mean(diff)
+        assert l_type == 'reg_l1'
+        target, pred = target.squeeze(-1), pred.squeeze(-1)
+        fi_mask = abs(f_mask - 1)
+        if torch.sum(fi_mask) != 0:
+            diff = torch.abs(torch.flatten(pred) - torch.flatten(target)) * torch.flatten(fi_mask)
+            loss = torch.sum(diff) / torch.sum(fi_mask)
         else:
-            raise NotImplementedError
+            # do not mask: this is for ablation
+            diff = torch.abs(torch.flatten(pred) - torch.flatten(target))
+            loss = torch.mean(diff)
 
         return loss
 
 
-    def forward(self, x, mask_s=0, mask_f=0, mask_s_strategy='uniform', mask_f_strategy='uniform', *args, **kwargs):
-        """
-        TODO: forward should output loss only 
-        """
+    def forward(self, x, mask_s=0, mask_f=0, mask_s_strategy='rw_fill', mask_f_strategy='patch_uniform', *args, **kwargs):
         # f_mask: [B, Tin, N]; s_mask: [N, N]
-        embedding, summary, f_mask, s_mask, rw_percent = self.encode(x, mask_s, mask_f, mask_s_strategy, mask_f_strategy, *args, **kwargs)
+        embedding, summary, f_mask, s_mask = self.encode(x, mask_s, mask_f, mask_s_strategy, mask_f_strategy, *args, **kwargs)
 
         recon_s = self.decode_structure(summary)    # [B, N, N]
         recon_f = self.decode_feature(summary)      # [B, T, N, C=1]
 
-        sl_type = kwargs.get('sl_type', 'reg_l2')
-        fl_type = kwargs.get('fl_type', 'reg_l2')
+        sl_type = kwargs.get('sl_type', 'cls_boost')
+        fl_type = kwargs.get('fl_type', 'reg_l1')
         s_loss = self.forward_s_loss(self.get_support(), recon_s, s_mask, sl_type)
         f_loss = self.forward_f_loss(x, recon_f, f_mask, fl_type)
 
@@ -535,13 +371,13 @@ class AGCRN(nn.Module):
         f_weight = kwargs.get('fl_weight', 1.0)
         loss = s_weight * s_loss + f_weight * f_loss
         
-        loss_info = {'s_loss': s_loss.item(), 'f_loss': f_loss.item(), 'loss': loss.item(), 'rw_percent': rw_percent}
+        loss_info = {'s_loss': s_loss.item(), 'f_loss': f_loss.item(), 'loss': loss.item()}
         return loss, loss_info
 
 
 class AGCRN_Decoder(nn.Module):
     """
-    agcrn decoder: exactly follow STGCL
+    agcrn decoder
     """
     def __init__(self, out_dim, rnn_units, horizon, de_mlp=False):
         super(AGCRN_Decoder, self).__init__()

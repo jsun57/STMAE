@@ -108,8 +108,8 @@ def main():
                 head = np.append(head, key)
                 ret_log = np.append(ret_log, value)
 
-            log = 'Epoch: {:03d}, Pretrain Loss: {:.4f}, RW Percent: {:.2f}'
-            print(log.format(epoch, epoch_loss, epoch_loss_info['rw_percent']))
+            log = 'Epoch: {:03d}, Pretrain Loss: {:.4f}'
+            print(log.format(epoch, epoch_loss))
 
             # update log file and save checkpoint
             is_create = False
