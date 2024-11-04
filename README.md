@@ -49,7 +49,13 @@ python train_pf.py --cfg <configuration_file_name>
 ## Citation
 If you find our work useful in your research, please consider citing our paper:
 ```
-Coming Soon!
+@inproceedings{sun2024revealing,
+  title={Revealing the power of masked autoencoders in traffic forecasting},
+  author={Sun, Jiarui and Fan, Yujie and Yeh, Chin-Chia Michael and Zhang, Wei and Chowdhary, Girish},
+  booktitle={Proceedings of the 33rd ACM International Conference on Information and Knowledge Management},
+  pages={4071--4075},
+  year={2024}
+}
 ```
 **Note:** 
 We borrow parts from [AGCRN](https://github.com/LeiBAI/AGCRN), [DCRNN](https://github.com/chnsh/DCRNN_PyTorch), [MTGNN](https://github.com/nnzhan/MTGNN) and [STGCL](https://github.com/liuxu77/STGCL).
